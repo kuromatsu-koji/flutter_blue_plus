@@ -8,6 +8,7 @@ import android.Manifest;
 import android.annotation.TargetApi;
 import android.app.Activity;
 import android.app.Application;
+import android.app.PendingIntent;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
@@ -202,7 +203,7 @@ public class FlutterBluePlusPlugin implements
         if (mBluetoothAdapter != null && mIsScanning) {
             BluetoothLeScanner scanner = mBluetoothAdapter.getBluetoothLeScanner();
             if (scanner != null) {
-                scanner.stopScan(getScanCallback());
+                scanner.stopScan(getBleScanReceiver());
                 mIsScanning = false;
             }
         }
@@ -305,7 +306,7 @@ public class FlutterBluePlusPlugin implements
                     // stop scanning
                     BluetoothLeScanner scanner = mBluetoothAdapter.getBluetoothLeScanner();
                     if(scanner != null && mIsScanning) {
-                        scanner.stopScan(getScanCallback());
+                        scanner.stopScan(getBleScanReceiver());
                         mIsScanning = false;
                     }
 
@@ -584,7 +585,7 @@ public class FlutterBluePlusPlugin implements
                         mAdvSeen.clear();
                         mScanCounts.clear();
 
-                        scanner.startScan(filters, settings, getScanCallback());
+                        scanner.startScan(filters, settings, getBleScanReceiver());
 
                         mIsScanning = true;
 
@@ -598,7 +599,7 @@ public class FlutterBluePlusPlugin implements
                     BluetoothLeScanner scanner = mBluetoothAdapter.getBluetoothLeScanner();
 
                     if(scanner != null) {
-                        scanner.stopScan(getScanCallback());
+                        scanner.stopScan(getBleScanReceiver());
                         mIsScanning = false;
                     }
 
@@ -1968,6 +1969,77 @@ public class FlutterBluePlusPlugin implements
             };
         }
         return scanCallback;
+    }
+
+    private final BroadcastReceiver mBleScanReceiver = new BroadcastReceiver()
+    {
+        @Override
+        public void onReceive(Context context, Intent intent)
+        {
+            int errorCode = intent.getIntExtra(BluetoothLeScanner.EXTRA_ERROR_CODE, -1);
+            if (errorCode != -1) {
+                // see BmScanResponse
+                HashMap<String, Object> response = new HashMap<>();
+                response.put("advertisements", new ArrayList<>());
+                response.put("success", 0);
+                response.put("error_code", errorCode);
+                response.put("error_string", scanFailedString(errorCode));
+
+                invokeMethodUIThread("OnScanResponse", response);
+                return;
+            }
+
+            // Callback type
+            int callbackType = intent.getIntExtra(BluetoothLeScanner.EXTRA_CALLBACK_TYPE, -1);
+            log(LogLevel.VERBOSE, "Callback type :" + callbackType);
+
+            ArrayList<ScanResult> scanResults = intent
+                    .getParcelableArrayListExtra(BluetoothLeScanner.EXTRA_LIST_SCAN_RESULT);
+            for (ScanResult result : scanResults) {
+                BluetoothDevice device = result.getDevice();
+                String remoteId = device.getAddress();
+                ScanRecord scanRecord = result.getScanRecord();
+                String advHex = scanRecord != null ? bytesToHex(scanRecord.getBytes()) : "";
+
+                // filter duplicates
+                if (((boolean) mScanFilters.get("continuous_updates")) == false) {
+                    boolean isDuplicate = mAdvSeen.containsKey(remoteId) && mAdvSeen.get(remoteId).equals(advHex);
+                    mAdvSeen.put(remoteId, advHex); // remember
+                    if (isDuplicate) {
+                        continue;
+                    }
+                }
+
+                // filter keywords
+                String name = scanRecord != null ? scanRecord.getDeviceName() : "";
+                List<String> keywords = (List<String>) mScanFilters.get("with_keywords");
+                if (filterKeywords(keywords, name) == false) {
+                    continue;
+                }
+
+                // filter divisor
+                if (((boolean) mScanFilters.get("continuous_updates")) != false) {
+                    int count = scanCountIncrement(remoteId);
+                    int divisor = (int) mScanFilters.get("continuous_divisor");
+                    if ((count % divisor) != 0) {
+                        continue;
+                    }
+                }
+
+                // see BmScanResponse
+                HashMap<String, Object> response = new HashMap<>();
+                response.put("advertisements", Arrays.asList(bmScanAdvertisement(device, result)));
+
+                invokeMethodUIThread("OnScanResponse", response);
+            }
+        }
+    };
+
+    PendingIntent getBleScanReceiver(Context context)
+    {
+        int requestCode = 222;
+        Intent intent = new Intent(context, mBleScanReceiver.getClass());
+        return PendingIntent.getBroadcast(context, requestCode, intent, PendingIntent.FLAG_UPDATE_CURRENT);
     }
 
     /////////////////////////////////////////////////////////////////////////////
